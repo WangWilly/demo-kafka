@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kafka Retry & DLT 處理機制展示</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .canvas-container {
+            position: relative;
+            width: 100%;
+            height: 550px;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        .log-container::-webkit-scrollbar { width: 8px; }
+        .log-container::-webkit-scrollbar-track { background: #f1f5f9; }
+        .log-container::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .log-container::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        
+        /* 讓按鈕在禁用狀態下有不同的外觀 */
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen p-4 md:p-6 flex flex-col gap-4">
+
+    <!-- 標題與比較區 -->
+    <div class="max-w-7xl w-full mx-auto bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+        <h1 class="text-2xl font-bold text-slate-800 mb-2">Kafka 錯誤處理與 DLT 機制 (vs RabbitMQ)</h1>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+            <div class="bg-blue-50 p-3 rounded border border-blue-100">
+                <h3 class="font-bold text-blue-800">RabbitMQ (Broker 驅動)</h3>
+                <ul class="list-disc list-inside text-slate-700 mt-1">
+                    <li>Broker 內建 DLX/DLQ 機制，自動路由。</li>
+                    <li>以訊息為單位 (Message-centric)，失敗可拒絕並獨立移出。</li>
+                    <li>推播模式 (Push)，不影響佇列中其他訊息。</li>
+                </ul>
+            </div>
+            <div class="bg-orange-50 p-3 rounded border border-orange-100">
+                <h3 class="font-bold text-orange-800">Kafka (Consumer 驅動)</h3>
+                <ul class="list-disc list-inside text-slate-700 mt-1">
+                    <li>Broker 是不可變日誌，無內建 DLT。由<b>客戶端框架</b>實作。</li>
+                    <li>基於 Offset (Partition-centric)，錯誤不跳過會<b>阻塞 (Block)</b>。</li>
+                    <li>處理失敗需「手動」產生新訊息至 Retry/DLT Topic，再移動 Offset。</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- 上半部：控制面板與 Canvas -->
+    <div class="max-w-7xl w-full mx-auto bg-white rounded-2xl shadow-xl overflow-hidden flex flex-col xl:flex-row border border-slate-200 flex-grow">
+        
+        <!-- 左側控制面板 -->
+        <div class="w-full xl:w-80 bg-slate-100 p-5 flex flex-col gap-5 border-r border-slate-200 shadow-inner z-10 shrink-0 overflow-y-auto">
+            
+            <div class="bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
+                <h2 class="font-semibold text-slate-700 mb-2">1. 生產者 (Producer)</h2>
+                <div class="flex gap-2 mb-2">
+                    <button id="btn-send-normal" class="flex-1 bg-green-600 hover:bg-green-700 text-white font-medium py-1.5 px-2 rounded transition-colors text-xs">
+                        發送正常訊息
+                    </button>
+                    <button id="btn-send-error" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-medium py-1.5 px-2 rounded transition-colors text-xs" title="模擬帶有錯誤標記的訊息，處理時會拋出異常">
+                        發送毒藥訊息
+                    </button>
+                </div>
+                <button id="btn-auto" class="w-full bg-slate-600 hover:bg-slate-700 text-white font-medium py-1.5 px-3 rounded transition-colors text-xs">
+                    隨機自動發送
+                </button>
+            </div>
+
+            <div class="bg-white p-3 rounded-xl border border-slate-200 shadow-sm flex flex-col gap-3">
+                <h2 class="font-semibold text-slate-700">2. 消費者錯誤處理策略</h2>
+                <p class="text-xs text-slate-500 mb-1">當遇到「毒藥訊息」拋出 Exception 時，客戶端應用程式的行為：</p>
+                
+                <div class="flex flex-col gap-2">
+                    <label class="flex items-start gap-2 cursor-pointer p-2 rounded hover:bg-slate-50 border border-transparent hover:border-slate-200 transition">
+                        <input type="radio" name="strategy" value="block" class="mt-0.5" checked>
+                        <div class="text-xs">
+                            <span class="font-bold text-red-600 block">無策略 (無限重試 / 阻塞)</span>
+                            <span class="text-slate-500">不更新 Offset，卡住整個 Partition。</span>
+                        </div>
+                    </label>
+                    <label class="flex items-start gap-2 cursor-pointer p-2 rounded hover:bg-slate-50 border border-transparent hover:border-slate-200 transition">
+                        <input type="radio" name="strategy" value="skip" class="mt-0.5">
+                        <div class="text-xs">
+                            <span class="font-bold text-orange-500 block">忽略並跳過 (Skip)</span>
+                            <span class="text-slate-500">印出 Log 後強制 Commit Offset，遺失訊息。</span>
+                        </div>
+                    </label>
+                    <label class="flex items-start gap-2 cursor-pointer p-2 rounded hover:bg-slate-50 border border-transparent hover:border-slate-200 transition">
+                        <input type="radio" name="strategy" value="dlt" class="mt-0.5">
+                        <div class="text-xs">
+                            <span class="font-bold text-blue-600 block">非同步 Retry + DLT</span>
+                            <span class="text-slate-500">將訊息發往 Retry/DLT Topic，推動主 Offset 前進。</span>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
+            <div class="bg-slate-800 p-3 rounded-xl border border-slate-700 shadow-sm text-slate-200">
+                <h2 class="font-semibold text-white mb-2">3. Consumer Group 狀態</h2>
+                <div class="text-xs space-y-2">
+                    <div class="flex justify-between">
+                        <span>主 Partition Offset:</span>
+                        <span id="stat-main-offset" class="font-mono text-green-400">0</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span>DLT 累積數量:</span>
+                        <span id="stat-dlt-count" class="font-mono text-red-400">0</span>
+                    </div>
+                    <div id="status-warning" class="hidden mt-2 p-1.5 bg-red-900/50 border border-red-500 rounded text-red-200 text-center animate-pulse">
+                        ⚠️ Partition 發生阻塞
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- 右側 Canvas 區 -->
+        <div class="flex-grow bg-white relative flex flex-col">
+            <div class="absolute top-2 right-2 bg-white/90 backdrop-blur p-2 rounded shadow border border-slate-100 text-[10px] flex gap-3 z-10 pointer-events-none">
+                <div class="flex items-center gap-1"><span class="w-2 h-2 bg-green-500"></span>正常訊息</div>
+                <div class="flex items-center gap-1"><span class="w-2 h-2 bg-red-500"></span>毒藥(錯誤)訊息</div>
+                <div class="flex items-center gap-1"><span class="w-2 h-2 bg-blue-500"></span>轉送 Retry/DLT</div>
+            </div>
+            
+            <div class="canvas-container flex-grow" id="canvas-wrapper">
+                <canvas id="kafka-canvas"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- 下半部：即時事件紀錄 Log -->
+    <div class="max-w-7xl w-full mx-auto bg-slate-900 rounded-xl shadow-lg overflow-hidden flex flex-col h-48 border border-slate-800">
+        <div class="bg-slate-800 p-2 border-b border-slate-700 flex justify-between items-center shrink-0">
+            <h3 class="text-slate-200 text-sm font-mono flex items-center gap-2">
+                <span class="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></span> Application Log (模擬消費者日誌)
+            </h3>
+            <button id="btn-clear-log" class="text-xs text-slate-400 hover:text-white px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 transition">清除紀錄</button>
+        </div>
+        <div id="log-container" class="log-container p-3 overflow-y-auto flex-grow font-mono text-xs text-slate-300 flex flex-col gap-1">
+        </div>
+    </div>
+
+<script>
+    // --- 系統狀態與設定 ---
+    const config = {
+        strategy: 'block', // 'block', 'skip', 'dlt'
+        pollInterval: 1500, // Consumer 輪詢間隔 (ms)
+        animationSpeed: 0.05,
+        autoSend: false
+    };
+
+    // --- DOM 綁定 ---
+    const wrapper = document.getElementById('canvas-wrapper');
+    const canvas = document.getElementById('kafka-canvas');
+    const ctx = canvas.getContext('2d');
+    
+    const btnSendNormal = document.getElementById('btn-send-normal');
+    const btnSendError = document.getElementById('btn-send-error');
+    const btnAuto = document.getElementById('btn-auto');
+    const strategyRadios = document.querySelectorAll('input[name="strategy"]');
+    
+    const statMainOffset = document.getElementById('stat-main-offset');
+    const statDltCount = document.getElementById('stat-dlt-count');
+    const statusWarning = document.getElementById('status-warning');
+    
+    const logContainer = document.getElementById('log-container');
+    const btnClearLog = document.getElementById('btn-clear-log');
+
+    // --- Canvas 響應式 ---
+    let width, height;
+    function resizeCanvas() {
+        const rect = wrapper.getBoundingClientRect();
+        canvas.width = rect.width * window.devicePixelRatio;
+        canvas.height = rect.height * window.devicePixelRatio;
+        ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+        width = rect.width;
+        height = rect.height;
+        updateLayout();
+    }
+    window.addEventListener('resize', resizeCanvas);
+
+    // --- 版面配置計算 ---
+    const layout = {
+        producer: { x: 0, y: 0 },
+        mainTopic: { x: 0, y: 0, width: 400, height: 60 },
+        consumerApp: { x: 0, y: 0 },
+        dltTopic: { x: 0, y: 0, width: 300, height: 60 }
+    };
+
+    function updateLayout() {
+        const cx = width / 2;
+        
+        layout.producer.x = 80;
+        layout.producer.y = 120;
+        
+        layout.mainTopic.x = 200;
+        layout.mainTopic.y = 90;
+        
+        layout.consumerApp.x = cx + 50;
+        layout.consumerApp.y = 280;
+        
+        layout.dltTopic.x = 200;
+        layout.dltTopic.y = 420;
+    }
+
+    // --- Logger 系統 ---
+    function addLog(action, detail, type = 'info') {
+        const time = new Date().toLocaleTimeString('zh-TW', { hour12: false, fractionalSecondDigits: 2 });
+        const el = document.createElement('div');
+        
+        let colorClass = 'text-slate-300';
+        if(type === 'error') colorClass = 'text-red-400';
+        if(type === 'warn') colorClass = 'text-orange-400';
+        if(type === 'success') colorClass = 'text-green-400';
+        if(type === 'sys') colorClass = 'text-blue-400 font-bold';
+
+        el.className = `flex gap-3 hover:bg-slate-800 p-1 rounded transition ${colorClass}`;
+        el.innerHTML = `
+            <span class="text-slate-500 shrink-0">[${time}]</span>
+            <span class="font-semibold shrink-0 w-24">[${action}]</span>
+            <span class="truncate">${detail}</span>
+        `;
+        logContainer.appendChild(el);
+        logContainer.scrollTop = logContainer.scrollHeight;
+    }
+
+    // --- 資料模型 ---
+    let globalOffset = 0;
+    let consumerOffset = 0; // 消費者當前準備處理的 Offset
+    let dltCount = 0;
+    let isBlocked = false;
+    let lastPollTime = 0;
+    let autoSendInterval = null;
+
+    // 代表寫入 Kafka Partition 的資料 (不可變 Log)
+    const mainPartition = []; 
+    const dltPartition = [];
+    
+    // 動畫用的正在飛行的訊息物件
+    let flyingMessages = [];
+
+    class MessageRecord {
+        constructor(isError, topic = 'main') {
+            this.offset = (topic === 'main') ? globalOffset++ : dltCount++;
+            this.isError = isError;
+            this.id = `MSG-${this.offset}`;
+            this.topic = topic; // 'main' or 'dlt'
+            this.state = 'in_log'; 
+            
+            // 繪圖位置計算 (在 Topic 長條圖中的位置)
+            // Kafka 是 append-only，新訊息加在右邊
+        }
+    }
+
+    // 代表在網路上傳輸或在 App 內流轉的視覺動畫物件
+    class FlyingMessage {
+        constructor(record, startX, startY, endX, endY, onComplete) {
+            this.record = record;
+            this.x = startX;
+            this.y = startY;
+            this.targetX = endX;
+            this.targetY = endY;
+            this.onComplete = onComplete;
+            this.progress = 0;
+        }
+
+        update() {
+            // 使用貝茲曲線產生較柔和的路徑
+            this.progress += config.animationSpeed;
+            if (this.progress > 1) {
+                this.progress = 1;
+                if (this.onComplete) {
+                    this.onComplete(this);
+                    this.onComplete = null; // 確保只觸發一次
+                }
+            }
+            
+            // 簡單的線性插值，加上一點拋物線效果
+            const dx = this.targetX - this.startX;
+            const dy = this.targetY - this.startY;
+            
+            // 若為 Pull 動作 (從 Topic 到 Consumer)，路徑不同
+            this.x = this.startX + (this.targetX - this.startX) * this.progress;
+            this.y = this.startY + (this.targetY - this.startY) * this.progress;
+            
+            // 加上一點弧度
+            const arcHeight = 30;
+            this.y -= Math.sin(this.progress * Math.PI) * arcHeight;
+        }
+
+        // 為了記錄起點而設定的屬性
+        get startX() { return this._startX || this.x; }
+        set startX(v) { this._startX = v; }
+        get startY() { return this._startY || this.y; }
+        set startY(v) { this._startY = v; }
+
+        draw(ctx) {
+            ctx.save();
+            ctx.beginPath();
+            // 依據訊息類型給顏色，如果是發往 DLT 的，給藍色
+            let color = this.record.isError ? '#ef4444' : '#22c55e';
+            if (this.record.topic === 'dlt_transit') color = '#3b82f6'; 
+
+            ctx.fillStyle = color;
+            ctx.fillRect(this.x - 10, this.y - 10, 20, 20); // 畫成方塊代表資料區塊
+            
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(this.x - 10, this.y - 10, 20, 20);
+            
+            ctx.fillStyle = '#fff';
+            ctx.font = '8px monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(this.record.offset, this.x, this.y);
+            ctx.restore();
+        }
+    }
+
+
+    // --- 繪圖函數 ---
+    function drawKafkaTopic(ctx, title, x, y, width, height, records, consumerCurrentOffset, isMain) {
+        ctx.save();
+        ctx.translate(x, y);
+
+        // 畫標題
+        ctx.fillStyle = '#334155';
+        ctx.font = 'bold 14px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(`Topic: ${title} (Partition 0)`, 0, -10);
+
+        // 畫外框 (長條狀)
+        ctx.strokeStyle = '#94a3b8';
+        ctx.lineWidth = 2;
+        ctx.fillStyle = '#f8fafc';
+        ctx.fillRect(0, 0, width, height);
+        ctx.strokeRect(0, 0, width, height);
+
+        // 畫日誌區塊 (Segments)
+        const boxSize = 40;
+        const spacing = 5;
+        // 計算可以顯示幾筆，超出則往左平移 (模擬滾動)
+        const maxVisible = Math.floor(width / (boxSize + spacing));
+        
+        // 決定顯示範圍
+        let startIndex = 0;
+        if (records.length > maxVisible) {
+            startIndex = records.length - maxVisible;
+        }
+
+        for (let i = startIndex; i < records.length; i++) {
+            const rec = records[i];
+            const drawX = 10 + (i - startIndex) * (boxSize + spacing);
+            const drawY = 10;
+
+            // 區塊背景
+            ctx.fillStyle = rec.isError ? '#fee2e2' : '#dcfce7';
+            ctx.fillRect(drawX, drawY, boxSize, boxSize);
+            ctx.strokeStyle = rec.isError ? '#ef4444' : '#22c55e';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(drawX, drawY, boxSize, boxSize);
+
+            // Offset 文字
+            ctx.fillStyle = '#475569';
+            ctx.font = '10px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(`Offset`, drawX + boxSize/2, drawY + 12);
+            ctx.font = 'bold 14px monospace';
+            ctx.fillStyle = rec.isError ? '#b91c1c' : '#15803d';
+            ctx.fillText(rec.offset, drawX + boxSize/2, drawY + 28);
+            
+            // 毒藥標記
+            if(rec.isError) {
+                ctx.fillText('☠️', drawX + boxSize/2, drawY - 5);
+            }
+        }
+
+        // 如果是主 Topic，畫出 Consumer Group 的 Offset 指標
+        if (isMain) {
+            // 計算指標位置
+            let pointerIndex = consumerCurrentOffset;
+            if (pointerIndex < startIndex) pointerIndex = startIndex; // 限制在可視範圍內
+            if (pointerIndex > records.length) pointerIndex = records.length;
+
+            const pointerX = 10 + (pointerIndex - startIndex) * (boxSize + spacing) + boxSize/2;
+            
+            ctx.beginPath();
+            ctx.moveTo(pointerX, height + 5);
+            ctx.lineTo(pointerX - 10, height + 20);
+            ctx.lineTo(pointerX + 10, height + 20);
+            ctx.fillStyle = isBlocked ? '#ef4444' : '#3b82f6';
+            ctx.fill();
+            
+            ctx.fillStyle = isBlocked ? '#ef4444' : '#3b82f6';
+            ctx.font = '12px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(`Consumer Offset: ${consumerCurrentOffset}`, pointerX, height + 35);
+        }
+
+        ctx.restore();
+    }
+
+    function drawComponent(ctx, x, y, label, icon, isErrorState = false) {
+        ctx.save();
+        ctx.translate(x, y);
+
+        ctx.fillStyle = isErrorState ? '#fee2e2' : '#fff';
+        ctx.strokeStyle = isErrorState ? '#ef4444' : '#475569';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.roundRect(-50, -40, 100, 80, 8);
+        ctx.fill();
+        ctx.stroke();
+        
+        ctx.fillStyle = '#334155';
+        ctx.font = '14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(label, 0, 25);
+        ctx.font = '32px sans-serif';
+        ctx.fillText(icon, 0, 0);
+
+        ctx.restore();
+    }
+
+
+    // --- 核心邏輯與動畫迴圈 ---
+    function animate() {
+        ctx.clearRect(0, 0, width, height);
+
+        // 1. 繪製組件
+        drawComponent(ctx, layout.producer.x, layout.producer.y, 'Producer', '👤');
+        drawComponent(ctx, layout.consumerApp.x, layout.consumerApp.y, 'Consumer App', isBlocked ? '⚠️' : '💻', isBlocked);
+
+        // 2. 繪製 Topics
+        drawKafkaTopic(ctx, 'events.main', layout.mainTopic.x, layout.mainTopic.y, layout.mainTopic.width, layout.mainTopic.height, mainPartition, consumerOffset, true);
+        drawKafkaTopic(ctx, 'events.main.DLT', layout.dltTopic.x, layout.dltTopic.y, layout.dltTopic.width, layout.dltTopic.height, dltPartition, 0, false);
+
+        // 3. 繪製連線示意
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([5, 5]);
+        // Producer -> Topic
+        ctx.beginPath(); ctx.moveTo(layout.producer.x + 50, layout.producer.y); ctx.lineTo(layout.mainTopic.x, layout.mainTopic.y + 30); ctx.stroke();
+        // Topic -> Consumer (Pull)
+        ctx.beginPath(); ctx.moveTo(layout.mainTopic.x + 200, layout.mainTopic.y + 60); ctx.lineTo(layout.consumerApp.x, layout.consumerApp.y - 40); ctx.stroke();
+        ctx.setLineDash([]);
+
+
+        const now = Date.now();
+
+        // 4. Consumer Poll 邏輯
+        if (now - lastPollTime > config.pollInterval) {
+            // 檢查是否有未處理的訊息
+            if (consumerOffset < mainPartition.length) {
+                const recordToProcess = mainPartition[consumerOffset];
+                
+                // 動畫：從 Topic 拉取訊息到 Consumer
+                const pullAnim = new FlyingMessage(
+                    recordToProcess, 
+                    layout.mainTopic.x + Math.min(200, consumerOffset * 45), layout.mainTopic.y + 60, // 大約從中間下面出發
+                    layout.consumerApp.x, layout.consumerApp.y - 40,
+                    (msg) => { handleRecordInConsumer(msg.record); }
+                );
+                pullAnim.startX = pullAnim.x; pullAnim.startY = pullAnim.y;
+                flyingMessages.push(pullAnim);
+                
+                addLog('POLL', `Consumer 拉取 Offset ${recordToProcess.offset}`);
+            }
+            lastPollTime = now;
+        }
+
+        // 5. 更新並繪製飛行中的訊息
+        for (let i = flyingMessages.length - 1; i >= 0; i--) {
+            const fm = flyingMessages[i];
+            fm.update();
+            fm.draw(ctx);
+            if (fm.progress >= 1) {
+                flyingMessages.splice(i, 1);
+            }
+        }
+
+        requestAnimationFrame(animate);
+    }
+
+    // --- Consumer 處理邏輯 (模擬客戶端行為) ---
+    function handleRecordInConsumer(record) {
+        if (!record.isError) {
+            // 正常處理
+            addLog('PROCESS', `成功處理 Offset ${record.offset}`, 'success');
+            consumerOffset++;
+            updateStats();
+            isBlocked = false;
+            statusWarning.classList.add('hidden');
+        } else {
+            // 發生錯誤 (毒藥訊息)
+            addLog('ERROR', `處理 Offset ${record.offset} 時發生 Exception!`, 'error');
+            
+            switch (config.strategy) {
+                case 'block':
+                    addLog('STRATEGY', '無策略配置，不斷重試相同 Offset...', 'warn');
+                    isBlocked = true;
+                    statusWarning.classList.remove('hidden');
+                    // offset 不前進，下一次 poll 會再次拉取相同的 offset
+                    break;
+                    
+                case 'skip':
+                    addLog('STRATEGY', 'Catch 異常，印出日誌後強行 Ack，跳過此訊息', 'warn');
+                    addLog('COMMIT', `強制提交 Offset ${record.offset + 1}`, 'sys');
+                    consumerOffset++; // 跳過，前進
+                    isBlocked = false;
+                    statusWarning.classList.add('hidden');
+                    break;
+                    
+                case 'dlt':
+                    addLog('STRATEGY', '啟動 Dead Letter 機制 (由 Spring Kafka 等框架攔截)', 'sys');
+                    isBlocked = false;
+                    statusWarning.classList.add('hidden');
+                    
+                    // 建立一筆要送往 DLT 的新紀錄
+                    const dltRecord = { ...record, topic: 'dlt_transit', originalOffset: record.offset };
+                    
+                    // 動畫：從 Consumer 發送到 DLT Topic
+                    const dltAnim = new FlyingMessage(
+                        dltRecord,
+                        layout.consumerApp.x, layout.consumerApp.y + 40,
+                        layout.dltTopic.x + 20, layout.dltTopic.y,
+                        () => {
+                            dltPartition.push(new MessageRecord(true, 'dlt'));
+                            addLog('PRODUCE', `將原始資料寫入 DLT Topic 成功`, 'warn');
+                            updateStats();
+                        }
+                    );
+                    dltAnim.startX = dltAnim.x; dltAnim.startY = dltAnim.y;
+                    flyingMessages.push(dltAnim);
+                    
+                    // DLT 發送後，主 Offset 前進
+                    addLog('COMMIT', `提交主 Topic Offset ${record.offset + 1}`, 'sys');
+                    consumerOffset++;
+                    break;
+            }
+        }
+        updateStats();
+    }
+
+    // --- UI 與互動 ---
+    function produceMessage(isError) {
+        const record = new MessageRecord(isError);
+        
+        // 動畫：Producer 發送到 Topic
+        const pubAnim = new FlyingMessage(
+            record,
+            layout.producer.x + 50, layout.producer.y,
+            layout.mainTopic.x + 10, layout.mainTopic.y + 30, // 大約飛到最左邊
+            () => {
+                mainPartition.push(record);
+                addLog('PRODUCE', `訊息寫入 events.main, Offset: ${record.offset}${isError ? ' (毒藥)' : ''}`, isError ? 'error' : 'info');
+                updateStats();
+            }
+        );
+        pubAnim.startX = pubAnim.x; pubAnim.startY = pubAnim.y;
+        flyingMessages.push(pubAnim);
+    }
+
+    btnSendNormal.addEventListener('click', () => produceMessage(false));
+    btnSendError.addEventListener('click', () => produceMessage(true));
+
+    btnAuto.addEventListener('click', () => {
+        config.autoSend = !config.autoSend;
+        if (config.autoSend) {
+            btnAuto.classList.replace('bg-slate-600', 'bg-purple-600');
+            btnAuto.textContent = '停止自動';
+            autoSendInterval = setInterval(() => {
+                // 15% 機率產生毒藥訊息
+                produceMessage(Math.random() < 0.15);
+            }, 1200);
+        } else {
+            btnAuto.classList.replace('bg-purple-600', 'bg-slate-600');
+            btnAuto.textContent = '隨機自動發送';
+            clearInterval(autoSendInterval);
+        }
+    });
+
+    strategyRadios.forEach(radio => {
+        radio.addEventListener('change', (e) => {
+            config.strategy = e.target.value;
+            addLog('CONFIG', `切換錯誤處理策略為: ${e.target.value.toUpperCase()}`, 'sys');
+            
+            // 如果從 block 切換出來，解開阻塞，讓下一次 poll 根據新策略處理
+            if (config.strategy !== 'block' && isBlocked) {
+                addLog('SYS', '策略變更，嘗試重新處理當前 Offset', 'info');
+                // 這裡簡單處理：直接讓下一次 poll 再跑一次 handleRecordInConsumer
+                // 視覺上就是警告消失
+                isBlocked = false;
+                statusWarning.classList.add('hidden');
+            }
+        });
+    });
+
+    btnClearLog.addEventListener('click', () => {
+        logContainer.innerHTML = '';
+    });
+
+    function updateStats() {
+        statMainOffset.textContent = consumerOffset;
+        statDltCount.textContent = dltPartition.length;
+    }
+
+    // --- 初始化 ---
+    resizeCanvas();
+    addLog('SYS', 'Kafka Consumer Error Handling 視覺化啟動', 'success');
+    addLog('SYS', 'Kafka Broker 只是不可變日誌，DLT 是在 Consumer 端實作的', 'info');
+    
+    // 預先塞入幾筆正常訊息
+    produceMessage(false);
+    setTimeout(()=> produceMessage(false), 500);
+
+    animate();
+
+</script>
+</body>
+</html>
