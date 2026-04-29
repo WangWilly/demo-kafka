@@ -44,7 +44,7 @@
         const MAX_PARTITIONS = 4;
         const MAX_CONSUMERS_PER_GROUP = 4;
         const COLORS = ['bg-red-500','bg-blue-500','bg-green-500','bg-amber-500','bg-purple-500','bg-pink-500'];
-        const generateId = () => Math.random().toString(36).substr(2, 9);
+        const generateId = () => Math.random().toString(36).substring(2, 11);
 
         // ── Main App ──────────────────────────────────────────────────────────
         function App() {
@@ -329,15 +329,18 @@
                                                     <span className="text-slate-400 text-xs italic w-full text-center">等待訊息寫入...</span>
                                                 ) : (
                                                     <div className="flex gap-1.5 items-center justify-end w-full">
-                                                        {partition.messages.slice(-12).map((msg, idx) => (
-                                                            <div
-                                                                key={msg.id}
-                                                                className={`${msg.color} text-white text-xs font-bold px-2 py-1.5 rounded shadow-sm flex-shrink-0 animate-slide-in border border-black/10`}
-                                                                title={`Offset: ${partition.messages.length - 12 + idx}`}
-                                                            >
-                                                                {msg.text}
-                                                            </div>
-                                                        ))}
+                                                        {(() => {
+                                                            const startIndex = Math.max(0, partition.messages.length - 12);
+                                                            return partition.messages.slice(-12).map((msg, idx) => (
+                                                                <div
+                                                                    key={msg.id}
+                                                                    className={`${msg.color} text-white text-xs font-bold px-2 py-1.5 rounded shadow-sm flex-shrink-0 animate-slide-in border border-black/10`}
+                                                                    title={`Offset: ${startIndex + idx}`}
+                                                                >
+                                                                    {msg.text}
+                                                                </div>
+                                                            ));
+                                                        })()}
                                                     </div>
                                                 )}
                                             </div>
