@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kafka 互動式學習平台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .card-hover {
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        .card-hover:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 12px 32px rgba(0,0,0,0.10);
+        }
+    </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
+
+    <!-- Hero Header -->
+    <header class="pt-16 pb-10 text-center px-4">
+        <div class="inline-flex items-center gap-3 mb-4">
+            <i class="fas fa-stream text-4xl text-blue-400"></i>
+            <h1 class="text-4xl md:text-5xl font-extrabold text-white tracking-tight">Kafka 互動式學習平台</h1>
+        </div>
+        <p class="text-slate-400 text-lg max-w-2xl mx-auto mt-2">
+            透過視覺化模擬器，深入理解 Apache Kafka 的核心機制與應用場景。
+        </p>
+    </header>
+
+    <!-- Demo Cards Grid -->
+    <main class="flex-1 max-w-5xl mx-auto w-full px-4 pb-16">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+
+            <!-- Card 1: Partitions & Consumer Groups -->
+            <a href="kafka-partitions.html" class="card-hover block bg-white rounded-2xl shadow-md overflow-hidden border border-slate-200">
+                <div class="bg-gradient-to-br from-indigo-600 to-blue-500 p-6 flex items-center justify-center h-36">
+                    <i class="fas fa-project-diagram text-white text-6xl opacity-90"></i>
+                </div>
+                <div class="p-5">
+                    <span class="text-xs font-semibold uppercase tracking-wider text-indigo-500 bg-indigo-50 px-2 py-1 rounded">核心機制</span>
+                    <h2 class="text-lg font-bold text-slate-800 mt-3 mb-2">
+                        核心機制視覺化模擬器
+                    </h2>
+                    <p class="text-sm text-slate-500 leading-relaxed">
+                        即時觀察 Topic、Partition、Consumer Group 以及 Offset 的運作方式。互動調整分區與消費者數量，觀察重新平衡 (Rebalance) 過程。
+                    </p>
+                    <div class="mt-4 flex items-center text-indigo-600 text-sm font-medium">
+                        開始模擬 <i class="fas fa-arrow-right ml-2 text-xs"></i>
+                    </div>
+                </div>
+            </a>
+
+            <!-- Card 2: Dead Letter Topic -->
+            <a href="kafka-deadletter.html" class="card-hover block bg-white rounded-2xl shadow-md overflow-hidden border border-slate-200">
+                <div class="bg-gradient-to-br from-orange-500 to-red-500 p-6 flex items-center justify-center h-36">
+                    <i class="fas fa-exclamation-circle text-white text-6xl opacity-90"></i>
+                </div>
+                <div class="p-5">
+                    <span class="text-xs font-semibold uppercase tracking-wider text-orange-500 bg-orange-50 px-2 py-1 rounded">錯誤處理</span>
+                    <h2 class="text-lg font-bold text-slate-800 mt-3 mb-2">
+                        Retry &amp; DLT 處理機制
+                    </h2>
+                    <p class="text-sm text-slate-500 leading-relaxed">
+                        展示 Kafka 如何處理消費失敗的訊息，以及 Dead Letter Topic (DLT) 與 RabbitMQ DLX 的差異與比較。
+                    </p>
+                    <div class="mt-4 flex items-center text-orange-600 text-sm font-medium">
+                        開始模擬 <i class="fas fa-arrow-right ml-2 text-xs"></i>
+                    </div>
+                </div>
+            </a>
+
+            <!-- Card 3: Event Sourcing & Streaming -->
+            <a href="kafka-usage.html" class="card-hover block bg-white rounded-2xl shadow-md overflow-hidden border border-slate-200">
+                <div class="bg-gradient-to-br from-emerald-500 to-teal-500 p-6 flex items-center justify-center h-36">
+                    <i class="fas fa-database text-white text-6xl opacity-90"></i>
+                </div>
+                <div class="p-5">
+                    <span class="text-xs font-semibold uppercase tracking-wider text-emerald-600 bg-emerald-50 px-2 py-1 rounded">應用場景</span>
+                    <h2 class="text-lg font-bold text-slate-800 mt-3 mb-2">
+                        事件溯源與串流分析
+                    </h2>
+                    <p class="text-sm text-slate-500 leading-relaxed">
+                        展示不可變日誌如何驅動多重消費者與歷史重播，實現電商系統的事件溯源 (Event Sourcing) 與即時串流分析。
+                    </p>
+                    <div class="mt-4 flex items-center text-emerald-600 text-sm font-medium">
+                        開始模擬 <i class="fas fa-arrow-right ml-2 text-xs"></i>
+                    </div>
+                </div>
+            </a>
+
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="text-center py-6 text-slate-500 text-sm border-t border-slate-700">
+        <p>Apache Kafka 互動式學習展示 &mdash; 由靜態 HTML 驅動，無需後端</p>
+    </footer>
+
+</body>
+</html>
