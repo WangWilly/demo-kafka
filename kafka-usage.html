@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kafka 核心場景：事件溯源與串流分析</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f1f5f9; }
+        .canvas-container {
+            width: 100%;
+            height: 350px;
+            background-image: radial-gradient(#e2e8f0 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+        canvas { display: block; width: 100%; height: 100%; }
+        
+        /* 動畫過渡效果 */
+        .state-update { animation: highlight 0.5s ease-out; }
+        @keyframes highlight {
+            0% { background-color: #fef08a; transform: scale(1.02); }
+            100% { background-color: transparent; transform: scale(1); }
+        }
+        
+        /* 隱藏捲軸但可滾動 */
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body class="min-h-screen p-4 flex flex-col gap-4">
+
+    <!-- 頂部資訊與控制區 -->
+    <header class="max-w-7xl mx-auto w-full bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden shrink-0">
+        <div class="bg-slate-800 p-4 flex justify-between items-center text-white">
+            <div>
+                <h1 class="text-2xl font-bold flex items-center gap-2">
+                    <i class="fas fa-database text-blue-400"></i> Kafka: Event Sourcing & Analytics
+                </h1>
+                <p class="text-sm text-slate-300 mt-1">展示不可變日誌如何驅動多重消費者與歷史重播</p>
+            </div>
+            <div class="flex gap-2">
+                <button id="btn-auto-gen" class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg font-medium transition flex items-center gap-2 shadow-lg">
+                    <i class="fas fa-bolt"></i> 模擬高併發流量
+                </button>
+            </div>
+        </div>
+        
+        <!-- 手動事件產生器 (Producer) -->
+        <div class="p-4 bg-slate-50 flex flex-wrap gap-4 items-center border-b border-slate-200">
+            <span class="font-bold text-slate-700 w-full md:w-auto"><i class="fas fa-user-edit"></i> 電商系統 (Producer)：產生業務事件</span>
+            <div class="flex gap-2">
+                <button onclick="produceEvent('ADD_CART', 100, '🍎 蘋果')" class="bg-white border border-green-500 text-green-700 hover:bg-green-50 px-3 py-1.5 rounded shadow-sm text-sm font-medium transition">
+                    + 加入蘋果 ($100)
+                </button>
+                <button onclick="produceEvent('ADD_CART', 50, '🍌 香蕉')" class="bg-white border border-yellow-500 text-yellow-700 hover:bg-yellow-50 px-3 py-1.5 rounded shadow-sm text-sm font-medium transition">
+                    + 加入香蕉 ($50)
+                </button>
+                <button onclick="produceEvent('REMOVE_CART', 100, '🍎 蘋果')" class="bg-white border border-red-500 text-red-700 hover:bg-red-50 px-3 py-1.5 rounded shadow-sm text-sm font-medium transition">
+                    - 移除蘋果
+                </button>
+                <button onclick="produceEvent('CHECKOUT', 0, '💳 結帳')" class="bg-white border border-purple-500 text-purple-700 hover:bg-purple-50 px-3 py-1.5 rounded shadow-sm text-sm font-medium transition">
+                    💳 完成結帳
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- 中間 Canvas 視覺化資料流 -->
+    <main class="max-w-7xl mx-auto w-full bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden shrink-0 relative">
+        <div class="absolute top-2 left-2 bg-white/90 backdrop-blur px-2 py-1 rounded text-xs font-bold text-slate-500 border border-slate-200 z-10 shadow-sm">
+            Kafka Topic (Append-Only Log) 視覺化
+        </div>
+        <div class="canvas-container" id="canvas-wrapper">
+            <canvas id="kafka-flow"></canvas>
+        </div>
+    </main>
+
+    <!-- 下方 Consumer Dashboards (展示三種不同視角) -->
+    <div class="max-w-7xl mx-auto w-full grid grid-cols-1 lg:grid-cols-2 gap-4 flex-grow">
+        
+        <!-- 左側：事件溯源 (Event Sourcing) -->
+        <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+            <div class="bg-indigo-50 border-b border-indigo-100 p-3 flex justify-between items-center">
+                <div>
+                    <h2 class="font-bold text-indigo-900 flex items-center gap-2">
+                        <i class="fas fa-shopping-cart text-indigo-600"></i> 事件溯源 App (Consumer A)
+                    </h2>
+                    <p class="text-[10px] text-indigo-700">狀態由歷史事件推演而來。只要重播，就能完美重建狀態。</p>
+                </div>
+                <button onclick="replayConsumer('A')" class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1.5 rounded transition shadow-sm flex items-center gap-1" title="將 Offset 歸零，重新計算購物車狀態">
+                    <i class="fas fa-history"></i> 重播重建 (Rebuild)
+                </button>
+            </div>
+            
+            <div class="p-4 flex-grow flex flex-col gap-4">
+                <div class="flex justify-between items-center bg-slate-50 p-2 rounded border border-slate-200">
+                    <span class="text-xs font-bold text-slate-500">當前讀取 Offset: <span id="offset-A" class="text-indigo-600 text-sm font-mono">0</span></span>
+                    <span class="text-xs font-bold text-slate-500">處理狀態: <span id="status-A" class="text-green-600">🟢 同步中</span></span>
+                </div>
+                
+                <div id="es-state-container" class="flex-grow border border-slate-200 rounded-lg p-4 transition-colors">
+                    <h3 class="text-sm font-bold text-slate-700 mb-2 border-b pb-1">當前購物車狀態 (Current State)</h3>
+                    <ul id="cart-items" class="space-y-2 mb-4 text-sm min-h-[60px]">
+                        <li class="text-slate-400 italic">購物車是空的</li>
+                    </ul>
+                    <div class="border-t pt-2 flex justify-between items-center">
+                        <span class="font-bold text-slate-700">總計：</span>
+                        <span id="cart-total" class="text-xl font-bold text-indigo-600">$0</span>
+                    </div>
+                    <div id="checkout-msg" class="hidden mt-2 text-center text-xs font-bold text-green-600 bg-green-50 py-1 rounded border border-green-200">
+                        ✅ 訂單已結帳
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右側：串流分析 (Streaming Analytics) -->
+        <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+            <div class="bg-teal-50 border-b border-teal-100 p-3 flex justify-between items-center">
+                <div>
+                    <h2 class="font-bold text-teal-900 flex items-center gap-2">
+                        <i class="fas fa-chart-bar text-teal-600"></i> 即時數據大屏 (Consumer B)
+                    </h2>
+                    <p class="text-[10px] text-teal-700">獨立消費同一份資料，專注於宏觀統計，互不影響。</p>
+                </div>
+                <button onclick="replayConsumer('B')" class="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1.5 rounded transition shadow-sm flex items-center gap-1" title="重播可以改變統計算算法，重新生成報表">
+                    <i class="fas fa-sync-alt"></i> 重新計算 (Recalculate)
+                </button>
+            </div>
+            
+            <div class="p-4 flex-grow flex flex-col gap-4">
+                <div class="flex justify-between items-center bg-slate-50 p-2 rounded border border-slate-200">
+                    <span class="text-xs font-bold text-slate-500">當前讀取 Offset: <span id="offset-B" class="text-teal-600 text-sm font-mono">0</span></span>
+                    <span class="text-xs font-bold text-slate-500">處理狀態: <span id="status-B" class="text-green-600">🟢 同步中</span></span>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-3">
+                    <div id="stat-card-1" class="bg-white border border-slate-200 rounded-lg p-3 text-center transition-colors">
+                        <div class="text-xs text-slate-500 font-bold mb-1">總事件數 (Events)</div>
+                        <div id="stat-total-events" class="text-2xl font-black text-slate-800">0</div>
+                    </div>
+                    <div id="stat-card-2" class="bg-white border border-slate-200 rounded-lg p-3 text-center transition-colors">
+                        <div class="text-xs text-slate-500 font-bold mb-1">累積交易額 (GMV)</div>
+                        <div id="stat-gmv" class="text-2xl font-black text-teal-600">$0</div>
+                    </div>
+                </div>
+
+                <div class="border border-slate-200 rounded-lg p-3 flex-grow">
+                    <h3 class="text-xs font-bold text-slate-700 mb-2">事件類型分佈分佈 (即時)</h3>
+                    <div class="space-y-2 text-xs font-medium text-slate-600">
+                        <div class="flex items-center gap-2">
+                            <span class="w-16">加入購物車</span>
+                            <div class="flex-grow bg-slate-100 rounded-full h-3 overflow-hidden">
+                                <div id="bar-add" class="bg-blue-400 h-full transition-all duration-300" style="width: 0%"></div>
+                            </div>
+                            <span id="count-add" class="w-6 text-right">0</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <span class="w-16">移除項目</span>
+                            <div class="flex-grow bg-slate-100 rounded-full h-3 overflow-hidden">
+                                <div id="bar-remove" class="bg-red-400 h-full transition-all duration-300" style="width: 0%"></div>
+                            </div>
+                            <span id="count-remove" class="w-6 text-right">0</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <span class="w-16">結帳完成</span>
+                            <div class="flex-grow bg-slate-100 rounded-full h-3 overflow-hidden">
+                                <div id="bar-checkout" class="bg-purple-400 h-full transition-all duration-300" style="width: 0%"></div>
+                            </div>
+                            <span id="count-checkout" class="w-6 text-right">0</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+<script>
+    // ==========================================
+    // 核心資料結構：Kafka Broker
+    // ==========================================
+    const kafkaLog = []; // Immutable Append-Only Log
+    let globalOffsetCounter = 0;
+
+    // 定義事件類型與視覺對應
+    const EVENT_TYPES = {
+        'ADD_CART': { color: '#3b82f6', icon: '➕' },   // Blue
+        'REMOVE_CART': { color: '#ef4444', icon: '➖' }, // Red
+        'CHECKOUT': { color: '#a855f7', icon: '💳' }    // Purple
+    };
+
+    // ==========================================
+    // 核心資料結構：Consumer Groups
+    // ==========================================
+    
+    // Consumer A: Event Sourcing (購物車狀態)
+    const consumerA = {
+        id: 'A',
+        offset: 0,
+        x: 0, y: 0, // Canvas 繪圖位置
+        targetY: 280,
+        state: { items: {}, total: 0, checkedOut: false },
+        
+        // Event Sourcing 的核心：Reducer 函數 (State + Event = New State)
+        applyEvent(event) {
+            if (this.state.checkedOut && event.type !== 'CHECKOUT') {
+                // 如果已結帳，新開一單 (簡化處理)
+                this.state = { items: {}, total: 0, checkedOut: false };
+            }
+
+            switch(event.type) {
+                case 'ADD_CART':
+                    if(this.state.items[event.item]) this.state.items[event.item]++;
+                    else this.state.items[event.item] = 1;
+                    this.state.total += event.amount;
+                    break;
+                case 'REMOVE_CART':
+                    if(this.state.items[event.item] > 0) {
+                        this.state.items[event.item]--;
+                        this.state.total -= event.amount;
+                        if(this.state.items[event.item] === 0) delete this.state.items[event.item];
+                    }
+                    break;
+                case 'CHECKOUT':
+                    this.state.checkedOut = true;
+                    break;
+            }
+            updateESUI();
+        },
+        
+        resetState() {
+            this.state = { items: {}, total: 0, checkedOut: false };
+            this.offset = 0;
+            updateESUI();
+        }
+    };
+
+    // Consumer B: Streaming Analytics (數據統計)
+    const consumerB = {
+        id: 'B',
+        offset: 0,
+        x: 0, y: 0,
+        targetY: 280,
+        state: { totalEvents: 0, gmv: 0, counts: { 'ADD_CART': 0, 'REMOVE_CART': 0, 'CHECKOUT': 0 } },
+        
+        applyEvent(event) {
+            this.state.totalEvents++;
+            this.state.counts[event.type]++;
+            if(event.type === 'ADD_CART') this.state.gmv += event.amount; // 簡化：加入購物車即視為潛在 GMV
+            updateAnalyticsUI();
+        },
+        
+        resetState() {
+            this.state = { totalEvents: 0, gmv: 0, counts: { 'ADD_CART': 0, 'REMOVE_CART': 0, 'CHECKOUT': 0 } };
+            this.offset = 0;
+            updateAnalyticsUI();
+        }
+    };
+
+    // ==========================================
+    // Canvas 繪圖引擎
+    // ==========================================
+    const canvas = document.getElementById('kafka-flow');
+    const ctx = canvas.getContext('2d');
+    const wrapper = document.getElementById('canvas-wrapper');
+    let width, height;
+    
+    // 飛行動畫陣列
+    let flyingParticles = [];
+
+    function resizeCanvas() {
+        const rect = wrapper.getBoundingClientRect();
+        canvas.width = rect.width * window.devicePixelRatio;
+        canvas.height = rect.height * window.devicePixelRatio;
+        ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+        width = rect.width;
+        height = rect.height;
+        
+        // 更新 Consumer 在 Canvas 上的相對位置
+        consumerA.x = width * 0.25;
+        consumerB.x = width * 0.75;
+    }
+    window.addEventListener('resize', resizeCanvas);
+
+    // ==========================================
+    // 核心邏輯
+    // ==========================================
+    
+    // 生產者：送入 Kafka
+    function produceEvent(type, amount, item) {
+        const event = {
+            offset: globalOffsetCounter++,
+            type: type,
+            amount: amount,
+            item: item,
+            timestamp: Date.now(),
+            color: EVENT_TYPES[type].color,
+            icon: EVENT_TYPES[type].icon
+        };
+        
+        kafkaLog.push(event);
+        
+        // 視覺特效：產生到 Log 的動畫
+        const logX = getLogXPosition(event.offset);
+        flyingParticles.push({
+            event: event,
+            x: width / 2, y: 20, // 從上方 Producer 飛入
+            targetX: logX, targetY: 150, // 飛到中間的 Log 區
+            progress: 0,
+            stage: 'producing'
+        });
+    }
+
+    // 計算在視覺化 Log 中 Offset 的 X 座標 (讓最新的在畫面中偏右，動態滾動)
+    const logBoxWidth = 35;
+    function getLogXPosition(offset) {
+        // 為了不讓畫面無限延伸，我們讓視角跟著最新的 offset 走
+        const maxVisible = Math.floor((width - 100) / logBoxWidth);
+        const latestOffset = Math.max(0, kafkaLog.length - 1);
+        
+        let startOffset = 0;
+        if (latestOffset > maxVisible - 5) {
+            startOffset = latestOffset - (maxVisible - 5);
+        }
+        
+        return 50 + (offset - startOffset) * logBoxWidth;
+    }
+
+    // 消費者：主動 Pull
+    function consumerPoll(consumer) {
+        if (consumer.offset < kafkaLog.length) {
+            const isReplaying = (kafkaLog.length - consumer.offset) > 5; // 如果落後很多，代表在重播或高流量，加快速度
+            
+            const eventToProcess = kafkaLog[consumer.offset];
+            
+            // 視覺特效：從 Log 飛向 Consumer
+            const logX = getLogXPosition(eventToProcess.offset);
+            
+            flyingParticles.push({
+                event: eventToProcess,
+                x: logX, y: 160,
+                targetX: consumer.x, targetY: consumer.targetY,
+                progress: 0,
+                stage: `pulling_${consumer.id}`,
+                speed: isReplaying ? 0.2 : 0.05 // 重播時動畫飛快一點
+            });
+            
+            // 推進 Offset
+            consumer.offset++;
+            document.getElementById(`offset-${consumer.id}`).textContent = consumer.offset;
+        }
+    }
+
+    // 重播功能
+    function replayConsumer(id) {
+        const consumer = id === 'A' ? consumerA : consumerB;
+        consumer.resetState();
+        document.getElementById(`status-${id}`).innerHTML = '🔄 重播中 (Replaying)';
+        document.getElementById(`status-${id}`).className = 'text-orange-500 font-bold animate-pulse';
+    }
+
+    // ==========================================
+    // UI 更新邏輯 (DOM)
+    // ==========================================
+    function updateESUI() {
+        const container = document.getElementById('es-state-container');
+        container.classList.remove('state-update');
+        void container.offsetWidth; // trigger reflow
+        container.classList.add('state-update');
+
+        const ul = document.getElementById('cart-items');
+        ul.innerHTML = '';
+        
+        const items = Object.entries(consumerA.state.items);
+        if (items.length === 0) {
+            ul.innerHTML = '<li class="text-slate-400 italic">購物車是空的</li>';
+        } else {
+            items.forEach(([name, count]) => {
+                ul.innerHTML += `<li class="flex justify-between border-b border-slate-100 pb-1"><span>${name}</span><span class="font-bold">x${count}</span></li>`;
+            });
+        }
+        
+        document.getElementById('cart-total').textContent = `$${consumerA.state.total}`;
+        
+        const msg = document.getElementById('checkout-msg');
+        if (consumerA.state.checkedOut) msg.classList.remove('hidden');
+        else msg.classList.add('hidden');
+    }
+
+    function updateAnalyticsUI() {
+        const c1 = document.getElementById('stat-card-1');
+        const c2 = document.getElementById('stat-card-2');
+        c1.classList.remove('state-update'); c2.classList.remove('state-update');
+        void c1.offsetWidth; void c2.offsetWidth;
+        c1.classList.add('state-update'); c2.classList.add('state-update');
+
+        document.getElementById('stat-total-events').textContent = consumerB.state.totalEvents;
+        document.getElementById('stat-gmv').textContent = `$${consumerB.state.gmv}`;
+        
+        const total = Math.max(1, consumerB.state.totalEvents); // 避免除以 0
+        const counts = consumerB.state.counts;
+        
+        document.getElementById('count-add').textContent = counts['ADD_CART'];
+        document.getElementById('bar-add').style.width = `${(counts['ADD_CART']/total)*100}%`;
+        
+        document.getElementById('count-remove').textContent = counts['REMOVE_CART'];
+        document.getElementById('bar-remove').style.width = `${(counts['REMOVE_CART']/total)*100}%`;
+        
+        document.getElementById('count-checkout').textContent = counts['CHECKOUT'];
+        document.getElementById('bar-checkout').style.width = `${(counts['CHECKOUT']/total)*100}%`;
+    }
+
+    // ==========================================
+    // 動畫迴圈
+    // ==========================================
+    function draw() {
+        ctx.clearRect(0, 0, width, height);
+        
+        // 1. 畫背景裝飾線 (Broker 區域)
+        ctx.fillStyle = '#f8fafc';
+        ctx.fillRect(0, 100, width, 100);
+        ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(0, 100); ctx.lineTo(width, 100); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, 200); ctx.lineTo(width, 200); ctx.stroke();
+        
+        ctx.fillStyle = '#94a3b8'; ctx.font = '12px sans-serif'; ctx.textAlign = 'left';
+        ctx.fillText('Kafka Broker: Topic Partition-0 (Append-Only Log 永久保存)', 20, 120);
+
+        // 2. 畫不可變的日誌區塊 (Kafka Log)
+        const maxVisible = Math.floor((width - 100) / logBoxWidth);
+        const latestOffset = Math.max(0, kafkaLog.length - 1);
+        let startOffset = 0;
+        if (latestOffset > maxVisible - 5) startOffset = latestOffset - (maxVisible - 5);
+
+        for (let i = startOffset; i < kafkaLog.length; i++) {
+            const event = kafkaLog[i];
+            const x = getLogXPosition(i);
+            const y = 140;
+            
+            // 畫框
+            ctx.fillStyle = '#fff';
+            ctx.strokeStyle = event.color;
+            ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.roundRect(x - logBoxWidth/2 + 2, y, logBoxWidth - 4, 40, 4);
+            ctx.fill(); ctx.stroke();
+            
+            // 畫 Icon 與 Offset
+            ctx.fillStyle = '#334155'; ctx.font = '16px sans-serif'; ctx.textAlign = 'center';
+            ctx.fillText(event.icon, x, y + 20);
+            ctx.font = '10px monospace';
+            ctx.fillText(event.offset, x, y + 35);
+        }
+
+        // 3. 畫 Consumer Offset 指標
+        const drawOffsetPointer = (consumer, color, labelYOffset) => {
+            // 如果 Offset 在可視範圍內才畫
+            if (consumer.offset >= startOffset && consumer.offset <= startOffset + maxVisible + 5) {
+                // 如果已經趕上最新進度，指標放在下一個要讀的位置
+                let ptrOffset = consumer.offset;
+                if(ptrOffset > kafkaLog.length) ptrOffset = kafkaLog.length;
+                
+                const ptrX = getLogXPosition(ptrOffset) - logBoxWidth/2;
+                const ptrY = 185;
+                
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.moveTo(ptrX, ptrY);
+                ctx.lineTo(ptrX - 8, ptrY + 10);
+                ctx.lineTo(ptrX + 8, ptrY + 10);
+                ctx.fill();
+                
+                ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
+                ctx.fillText(`C-${consumer.id} Offset`, ptrX, ptrY + 22 + labelYOffset);
+                
+                // 畫一條虛線連到 Consumer
+                ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+                ctx.beginPath(); ctx.moveTo(ptrX, ptrY+25+labelYOffset); 
+                // 指向對應的 Consumer 區域中心
+                ctx.lineTo(consumer.x, 260); 
+                ctx.stroke(); ctx.setLineDash([]);
+            }
+        };
+        
+        drawOffsetPointer(consumerA, '#4f46e5', 0);   // Indigo
+        drawOffsetPointer(consumerB, '#0d9488', 12);  // Teal
+
+        // 4. 畫 Consumer 接收點標示 (Canvas 底部)
+        const drawConsumerEnd = (consumer, color, icon, label) => {
+            ctx.fillStyle = '#fff'; ctx.strokeStyle = color; ctx.lineWidth = 3;
+            ctx.beginPath(); ctx.arc(consumer.x, 280, 25, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = color; ctx.font = '24px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText(icon, consumer.x, 280);
+            ctx.textBaseline = 'alphabetic';
+        };
+        drawConsumerEnd(consumerA, '#4f46e5', '🛒');
+        drawConsumerEnd(consumerB, '#0d9488', '📊');
+
+
+        // 5. 更新並繪製飛行動畫
+        for (let i = flyingParticles.length - 1; i >= 0; i--) {
+            const p = flyingParticles[i];
+            const speed = p.speed || 0.08; // 預設速度
+            p.progress += speed;
+            
+            if (p.progress >= 1) {
+                // 到達目標
+                if (p.stage === 'pulling_A') {
+                    consumerA.applyEvent(p.event);
+                    if(consumerA.offset === kafkaLog.length) {
+                        document.getElementById('status-A').innerHTML = '🟢 同步最新 (Up to date)';
+                        document.getElementById('status-A').className = 'text-green-600 font-bold';
+                    }
+                } else if (p.stage === 'pulling_B') {
+                    consumerB.applyEvent(p.event);
+                    if(consumerB.offset === kafkaLog.length) {
+                        document.getElementById('status-B').innerHTML = '🟢 同步最新 (Up to date)';
+                        document.getElementById('status-B').className = 'text-green-600 font-bold';
+                    }
+                }
+                flyingParticles.splice(i, 1);
+            } else {
+                // 移動計算 (加入緩動效果 ease-out)
+                const ease = 1 - Math.pow(1 - p.progress, 3);
+                const currentX = p.x + (p.targetX - p.x) * ease;
+                const currentY = p.y + (p.targetY - p.y) * ease;
+                
+                ctx.fillStyle = p.event.color;
+                ctx.beginPath(); ctx.arc(currentX, currentY, 8, 0, Math.PI*2); ctx.fill();
+                ctx.fillStyle = '#fff'; ctx.strokeStyle = '#fff'; ctx.lineWidth=1; ctx.stroke();
+                ctx.font = '10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline='middle';
+                ctx.fillText(p.event.icon, currentX, currentY);
+                ctx.textBaseline='alphabetic';
+            }
+        }
+    }
+
+    function loop() {
+        draw();
+        
+        // Consumer 輪詢邏輯 (定時去拉取)
+        // 為了視覺效果，如果落後，就一直拉 (模擬高吞吐量)
+        if (Math.random() < 0.8) consumerPoll(consumerA);
+        if (Math.random() < 0.8) consumerPoll(consumerB);
+        
+        requestAnimationFrame(loop);
+    }
+
+    // ==========================================
+    // 自動產生資料模擬 (高併發流量)
+    // ==========================================
+    let autoGenInterval = null;
+    const btnAutoGen = document.getElementById('btn-auto-gen');
+    
+    btnAutoGen.addEventListener('click', () => {
+        if (autoGenInterval) {
+            clearInterval(autoGenInterval);
+            autoGenInterval = null;
+            btnAutoGen.innerHTML = '<i class="fas fa-bolt"></i> 模擬高併發流量';
+            btnAutoGen.className = 'bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg font-medium transition flex items-center gap-2 shadow-lg';
+        } else {
+            btnAutoGen.innerHTML = '<i class="fas fa-stop"></i> 停止模擬';
+            btnAutoGen.className = 'bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-lg font-medium transition flex items-center gap-2 shadow-lg';
+            
+            autoGenInterval = setInterval(() => {
+                const rand = Math.random();
+                if (rand < 0.5) produceEvent('ADD_CART', 100, '🍎 蘋果');
+                else if (rand < 0.8) produceEvent('ADD_CART', 50, '🍌 香蕉');
+                else if (rand < 0.95) produceEvent('REMOVE_CART', 100, '🍎 蘋果');
+                else produceEvent('CHECKOUT', 0, '💳 結帳');
+            }, 300); // 快速產生
+        }
+    });
+
+    // 初始化
+    resizeCanvas();
+    updateESUI();
+    updateAnalyticsUI();
+    
+    // 預先產生一點資料
+    setTimeout(() => produceEvent('ADD_CART', 100, '🍎 蘋果'), 500);
+    setTimeout(() => produceEvent('ADD_CART', 50, '🍌 香蕉'), 1000);
+    setTimeout(() => produceEvent('REMOVE_CART', 100, '🍎 蘋果'), 2000);
+    
+    loop();
+
+</script>
+</body>
+</html>
